@@ -12,7 +12,7 @@
     RootModule             = 'PSSubnetCarver.psm1'
 
     # Version number of this module.
-    ModuleVersion          = '1.5.0'
+    ModuleVersion          = '2.1.0'
 
     # Supported PSEditions
     # CompatiblePSEditions = @()
@@ -33,7 +33,7 @@
     Description            = 'Divide a root network range into it''s component subnets'
 
     # Minimum version of the PowerShell engine required by this module
-    PowerShellVersion      = '6.0'
+    PowerShellVersion      = '7.0'
 
     # Name of the PowerShell host required by this module
     # PowerShellHostName = ''
@@ -42,7 +42,7 @@
     # PowerShellHostVersion = ''
 
     # Minimum version of Microsoft .NET Framework required by this module. This prerequisite is valid for the PowerShell Desktop edition only.
-    DotNetFrameworkVersion = '5.0'
+    DotNetFrameworkVersion = '6.0'
 
     # Minimum version of the common language runtime (CLR) required by this module. This prerequisite is valid for the PowerShell Desktop edition only.
     # ClrVersion = ''
@@ -77,7 +77,8 @@
         'Get-SCContext',
         'Get-SCSubnet',
         'Set-SCContext',
-        'Test-SCNetworkIsValid'
+        'Test-SCNetworkIsValid',
+        'Remove-SCSubnet'
     )
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
@@ -121,11 +122,7 @@
             # ReleaseNotes of this module
             ReleaseNotes = @"
 
-            Removed compiled cmdlets, module now calls qIPAM library code with native PowerShell functions. This removes any potential for dependency issues inside the compiled cmdlet, since they are pure PowerShell now.
-
-            Help references 10.1.0.0/16 and 10.2.0.0/16 instead of 10.0.1.0/16 and 10.0.2.0/16, which aren't valid ranges.
-
-
+            Added parameter set to Import-SCContext to target a Virtual Network in Azure, and import it as a stored context.
 "@
 
             # Prerelease string of this module

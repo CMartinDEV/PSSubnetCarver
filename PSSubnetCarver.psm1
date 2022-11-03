@@ -1,4 +1,31 @@
-﻿<#
+﻿# Modified function found here: https://stackoverflow.com/questions/8365537/checking-for-a-range-in-powershell
+function Test-IPAddressInRange {
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory, Position = 0)]
+        [string] $IPAddress,
+        [Parameter(Mandatory, Position = 1)]
+        [string] $FromAddress,
+        [Parameter(Mandatory, Position = 2)]
+        [string] $ToAddress
+        )
+    
+        $ip = [System.Net.IPAddress]::Parse($IPAddress).GetAddressBytes()
+        [array]::Reverse($ip)
+        $ip = [System.BitConverter]::ToUInt32($ip, 0)
+    
+        $from = [System.Net.IPAddress]::Parse($FromAddress).GetAddressBytes()
+        [array]::Reverse($from)
+        $from = [System.BitConverter]::ToUInt32($from, 0)
+    
+        $to = [System.Net.IPAddress]::Parse($ToAddress).GetAddressBytes()
+        [array]::Reverse($to)
+        $to = [System.BitConverter]::ToUInt32($to, 0)
+    
+        $from -le $ip -and $ip -le $to
+}
+
+<#
 .SYNOPSIS
  Import a PSSubnetCarver context from a file on disk, or from Azure blob storage.
 
@@ -39,17 +66,26 @@ function Import-SCContext {
         [Parameter(Mandatory = $true, Position = 0, ParameterSetName = "FromJson")]
         [string]$Json,
 
-        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = "FromAzure")]
+        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = "FromStorageBlob")]
         [string]$StorageAccountName,
 
-        [Parameter(Mandatory = $true, Position = 1, ParameterSetName = "FromAzure")]
+        [Parameter(Mandatory = $true, Position = 1, ParameterSetName = "FromStorageBlob")]
         [string]$ContainerName,
 
-        [Parameter(Mandatory = $true, Position = 2, ParameterSetName = "FromAzure")]
+        [Parameter(Mandatory = $true, Position = 2, ParameterSetName = "FromStorageBlob")]
         [string]$SASToken,
 
-        [Parameter(Mandatory = $false, Position = 3, ParameterSetName = "FromAzure")]
-        [string]$ContextName = "default"
+        [Parameter(Mandatory = $false, Position = 3, ParameterSetName = "FromStorageBlob")]
+        [string]$ContextName = "default",
+
+        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = "FromAzureVirtualNetwork")]
+        [Guid]$SubscriptionId,
+        [Parameter(Mandatory = $true, Position = 1, ParameterSetName = "FromAzureVirtualNetwork")]
+        [string]$ResourceGroupName,
+        [Parameter(Mandatory = $true, Position = 2, ParameterSetName = "FromAzureVirtualNetwork")]
+        [string]$VirtualNetworkName,
+        [Parameter(Mandatory = $true, Position = 3, ParameterSetName = "FromAzureVirtualNetwork")]
+        [string]$BearerToken
     )
 
     if ($PSCmdlet.ParameterSetName -eq "FromFile") {
@@ -58,7 +94,7 @@ function Import-SCContext {
     elseif ($PSCmdlet.ParameterSetName -eq "FromJson") {
         $model = $Json | ConvertFrom-Json
     }
-    elseif ($PSCmdlet.ParameterSetName -eq "FromAzure") {
+    elseif ($PSCmdlet.ParameterSetName -eq "FromStorageBlob") {
 
         $fileName = "$($ContextName.ToLower()).json"
 
@@ -86,12 +122,66 @@ function Import-SCContext {
         }
 
     }
+    elseif ($PSCmdlet.ParameterSetName -eq "FromAzureVirtualNetwork") {
+        $uri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Network/virtualNetworks/$($VirtualNetworkName)?api-version=2022-05-01"
+
+        $vnet = Invoke-RestMethod -Uri $uri -Method Get -Headers @{ Authorization = "bearer $BearerToken" } -ErrorAction Stop
+    
+        $contextName = $vnet.name
+    
+        $subnets = [System.Collections.ArrayList]$vnet.properties.subnets | Select-Object -Property 'Name',@{ Name = 'Range'; Expression = { [qIPAM.Models.IPAddressRange]$_.properties.addressPrefix } }
+    
+        $prefixes = [qIPAM.Models.IPAddressRange[]]$vnet.properties.addressSpace.addressPrefixes
+    
+        $prefixCount = $prefixes | Measure-Object | Select-Object -ExpandProperty Count
+    
+        foreach ($prefix in $prefixes) {
+            
+            $ctxName = if ($prefixCount -gt 1) {
+                "$($contextName)_$($prefixes.IndexOf($prefix) + 1)"
+            }
+            else {
+                $contextName
+            }
+    
+            try {
+                Set-SCContext -Name $ctxName -RootAddressSpace $prefix -ErrorAction Stop    
+            }
+            catch {
+                Write-Error -Message "$_" -ErrorAction Continue
+                continue
+            }
+    
+            [System.Collections.ArrayList] $claimedSubnets = @()
+    
+            $subnets | ForEach-Object -Process { 
+                try {
+    
+                    if ((Test-IPAddressInRange -ipAddress $_.Range.FirstUsableIPAddress -fromAddress $prefix.FirstUsableIPAddress -toAddress $prefix.LastUsableIPAddress) -and
+                        (Test-IPAddressInRange -ipAddress $_.Range.LastUsableIPAddress -fromAddress $prefix.FirstUsableIPAddress -toAddress $prefix.LastUsableIPAddress)) {
+                            $null = Get-SCSubnet -ContextName $ctxName -ReserveIPAddress $_.Range -ErrorAction Stop
+                            $null = $claimedSubnets.Add($_.Range)
+                    }
+                }
+                catch {
+                    return
+                }
+             }
+    
+             $subnets = $subnets | Where-Object -Property Range -NotIn $claimedSubnets
+        }
+
+        # Adding return here because this one doesn't fit the pattern, and we don't want to hit the Set-SCContext at the end
+        return
+    }
     else {
         Write-Error -Message "Parameter set $($PSCmdlet.ParameterSetName) has not been properly implemented." -ErrorAction Stop
     }
 
     Set-SCContext -Name $model.Name -RootAddressSpace $model.RootIPAddressRange -ConsumedIPRanges $model.ConsumedRanges
 }
+
+
 
 <#
 .SYNOPSIS
@@ -256,7 +346,7 @@ function Clear-SCContext {
         Write-Error -Message "No context configured named $Name." -Exception ([qIPAM.Extensions.QIPSubnetCarverContextNotSetException]::new($Name)) -ErrorAction Stop
     }
 
-    [qIPAM.Extensions.QIPSubnetCarverContext]::Instances.Clear()
+    [qIPAM.Extensions.QIPSubnetCarverContext]::Instances[$Name].Clear()
 }
 
 <#
@@ -304,7 +394,7 @@ function Get-SCContext {
             Write-Error -Message "No context configured named $_." -Exception ([qIPAM.Extensions.QIPSubnetCarverContextNotSetException]::new($_)) -ErrorAction Stop
         }
 
-        [qIPAM.Extensions.QIPContextModel]::new($_, [qIPAM.Extensions.QIPSubnetCarverContext]::Instances[$_].RootCIDR, [qIPAM.Extensions.QIPSubnetCarverContext]::Instances[$_].ConsumedRanges)
+        [qIPAM.Models.QIPContextModel]::new($_, [qIPAM.Extensions.QIPSubnetCarverContext]::Instances[$_].RootCIDR, [qIPAM.Extensions.QIPSubnetCarverContext]::Instances[$_].ConsumedRanges)
     }
 }
 
@@ -493,4 +583,50 @@ function Test-SCNetworkIsValid {
     )
 
     [qIPAM.Extensions.QIPSubnetCarverContext]::TestNetwork($RootIPRange, $ConsumedIPRanges)
+}
+
+<#
+.SYNOPSIS
+ Remove a consumed range from a context.
+
+.DESCRIPTION
+ Remove a consumed range from an in-memory context, marking that address range as free. Note this will only remove exact matches, not chunks.
+
+.PARAMETER IPAddressRange
+ The IP address range(s) to remove from the in-memory context.
+
+.PARAMETER ContextName
+ The name of the in-memory context to modify. Defaults to "default".
+
+.EXAMPLE
+ Remove-SCSubnet -IPAddressRange "10.1.0.0/16","10.2.0.0/16"
+
+ Removes the ranges 10.1.0.0/16 and 10.2.0.0/16 from the in-memory context named "default".
+#>
+function Remove-SCSubnet {
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [qIPAM.Models.IPAddressRange[]] $IPAddressRange,
+
+        [Parameter(Mandatory = $false, Position = 1)]
+        [Alias("Name", "Context")]
+        [string] $ContextName = "default"
+    )
+    Begin {
+        if (-not (Test-ContextConfigured -Name $ContextName -ErrorAction Stop)) {
+            Write-Error -Message "No context configured named $ContextName." -Exception ([qIPAM.Extensions.QIPSubnetCarverContextNotSetException]::new($ContextName)) -ErrorAction Stop
+        }
+    }
+    Process {
+        $IPAddressRange | ForEach-Object -Process {
+
+            if ([qIPAM.Extensions.QIPSubnetCarverContext]::Instances[$ContextName].ConsumedRanges.Contains($_)) {
+                [qIPAM.Extensions.QIPSubnetCarverContext]::Instances[$ContextName].Remove($_)
+            }
+            else {
+                Write-Warning -Message "Range $_ was not found in context $ContextName, so nothing was removed."
+            }
+        }
+    }
 }
